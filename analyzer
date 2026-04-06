@@ -1,35 +1,38 @@
 import pandas as pd
 
-def aggregate_exact_campaign_metrics(sp_df, sb_df):
-    # Combine both reports
+def aggregate_unique_search_terms(sp_df, sb_df):
+    # 1. Combine Sponsored Products and Sponsored Brands
     combined_df = pd.concat([sp_df, sb_df], ignore_index=True)
     
-    # Standardize headers
+    # 2. Standardize column names for Amazon Bulk Files
     column_mapping = {
-        'Customer Search Term': 'Term',
-        'Keyword': 'Term',
         'Campaign Name': 'Campaign',
-        'Match Type': 'Match Type',
+        'Customer Search Term': 'Search Term',
+        'Keyword': 'Search Term', # Fallback if Customer Search Term is missing
         'Spend': 'Spend',
         'Sales': 'Sales',
+        'Clicks': 'Clicks',
         'Orders': 'Orders',
-        'Clicks': 'Clicks'
+        'Impressions': 'Impressions'
     }
     combined_df = combined_df.rename(columns=column_mapping)
 
-    # Filter for EXACT match type only
-    exact_df = combined_df[combined_df['Match Type'].str.upper() == 'EXACT']
+    # 3. Remove rows where Search Term or Campaign is missing
+    combined_df = combined_df.dropna(subset=['Campaign', 'Search Term'])
 
-    # GROUP BY: This ensures keywords are summarized PER CAMPAIGN
-    summary_df = exact_df.groupby(['Campaign', 'Term']).agg({
+    # 4. THE FIX: Group by Campaign AND Search Term to get CUMULATIVE values
+    # This removes all repeats within the same campaign.
+    aggregated_df = combined_df.groupby(['Campaign', 'Search Term']).agg({
         'Spend': 'sum',
         'Sales': 'sum',
+        'Clicks': 'sum',
         'Orders': 'sum',
-        'Clicks': 'sum'
+        'Impressions': 'sum'
     }).reset_index()
 
-    # Calculate Efficiency Metrics
-    summary_df['ACOS'] = (summary_df['Spend'] / summary_df['Sales']).fillna(0)
-    summary_df['ROAS'] = (summary_df['Sales'] / summary_df['Spend']).fillna(0)
+    # 5. Calculate efficiency metrics for the summarized rows
+    aggregated_df['ACOS'] = (aggregated_df['Spend'] / aggregated_df['Sales']).fillna(0)
+    aggregated_df['ROAS'] = (aggregated_df['Sales'] / aggregated_df['Spend']).fillna(0)
     
-    return summary_df.sort_values(by='Spend', ascending=False)
+    # Sort by Spend so you see the biggest "Bleeders" or "Winners" first
+    return aggregated_df.sort_values(by='Spend', ascending=False)
