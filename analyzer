@@ -1,23 +1,15 @@
 import pandas as pd
 
-def load_bulk_file(file):
-    # Load every single tab into a dictionary
-    all_sheets = pd.read_excel(file, sheet_name=None)
-    
-    # Isolate the data for analysis
-    sp_df = all_sheets.get('SP Search Term Report', pd.DataFrame())
-    sb_df = all_sheets.get('SB Search Term Report', pd.DataFrame())
-    
-    return sp_df, sb_df, all_sheets
-
-def aggregate_data(sp_df, sb_df):
+def aggregate_exact_campaign_metrics(sp_df, sb_df):
+    # Combine both reports
     combined_df = pd.concat([sp_df, sb_df], ignore_index=True)
     
-    # Standardize column names
+    # Standardize headers
     column_mapping = {
         'Customer Search Term': 'Term',
         'Keyword': 'Term',
         'Campaign Name': 'Campaign',
+        'Match Type': 'Match Type',
         'Spend': 'Spend',
         'Sales': 'Sales',
         'Orders': 'Orders',
@@ -25,40 +17,19 @@ def aggregate_data(sp_df, sb_df):
     }
     combined_df = combined_df.rename(columns=column_mapping)
 
-    # Group by Term to analyze performance across DIFFERENT campaigns
-    agg_logic = {
-        'Campaign': 'nunique', 
+    # Filter for EXACT match type only
+    exact_df = combined_df[combined_df['Match Type'].str.upper() == 'EXACT']
+
+    # GROUP BY: This ensures keywords are summarized PER CAMPAIGN
+    summary_df = exact_df.groupby(['Campaign', 'Term']).agg({
         'Spend': 'sum',
         'Sales': 'sum',
         'Orders': 'sum',
         'Clicks': 'sum'
-    }
-    
-    global_df = combined_df.groupby('Term').agg(agg_logic).reset_index()
-    global_df = global_df.rename(columns={'Campaign': 'Campaign Count'})
-    global_df['ACOS'] = (global_df['Spend'] / global_df['Sales']).fillna(0)
-    
-    return global_df
-
-def perform_ngram_analysis(df, n):
-    ngram_data = []
-    for _, row in df.iterrows():
-        words = str(row['Term']).split()
-        if len(words) >= n:
-            for i in range(len(words) - n + 1):
-                gram = " ".join(words[i:i+n])
-                ngram_data.append({
-                    'Term': gram,
-                    'Spend': row['Spend'],
-                    'Sales': row['Sales'],
-                    'Orders': row['Orders'],
-                    'Campaign Count': row['Campaign Count']
-                })
-    
-    ngram_df = pd.DataFrame(ngram_data)
-    final_ngram = ngram_df.groupby('Term').agg({
-        'Spend': 'sum', 'Sales': 'sum', 'Orders': 'sum', 'Campaign Count': 'max'
     }).reset_index()
+
+    # Calculate Efficiency Metrics
+    summary_df['ACOS'] = (summary_df['Spend'] / summary_df['Sales']).fillna(0)
+    summary_df['ROAS'] = (summary_df['Sales'] / summary_df['Spend']).fillna(0)
     
-    final_ngram['ACOS'] = (final_ngram['Spend'] / final_ngram['Sales']).fillna(0)
-    return final_ngram.sort_values(by='Spend', ascending=False)
+    return summary_df.sort_values(by='Spend', ascending=False)
