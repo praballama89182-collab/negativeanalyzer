@@ -1,45 +1,82 @@
 import pandas as pd
-import numpy as np
-from collections import defaultdict
-import re
 
-def load_bulk_file(bulk_file_path):
-    excel_file = pd.ExcelFile(bulk_file_path)
-    sp_df = pd.read_excel(excel_file, 'SP Search Term Report')
-    sb_df = pd.read_excel(excel_file, 'SB Search Term Report')
-    return sp_df, sb_df
+def load_bulk_file(file):
+    # Load EVERY tab in the Excel file into a dictionary of DataFrames
+    all_sheets = pd.read_excel(file, sheet_name=None)
+    
+    # Identify the specific tabs needed for analysis
+    sp_tab = 'SP Search Term Report'
+    sb_tab = 'SB Search Term Report'
+    
+    # Extract only if they exist, otherwise return empty DataFrames to prevent crashes
+    sp_df = all_sheets.get(sp_tab, pd.DataFrame())
+    sb_df = all_sheets.get(sb_tab, pd.DataFrame())
+    
+    return sp_df, sb_df, all_sheets
 
 def aggregate_data(sp_df, sb_df):
-    relevant_cols = ['Customer Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders', 'ACOS', 'CPC', 'Conversion Rate']
-    combined_df = pd.concat([sp_df[relevant_cols], sb_df[relevant_cols]], ignore_index=True).fillna(0)
+    # Combine SP and SB data
+    combined_df = pd.concat([sp_df, sb_df], ignore_index=True)
     
-    aggregated = combined_df.groupby('Customer Search Term').agg({
-        'Impressions': 'sum', 'Clicks': 'sum', 'Spend': 'sum', 'Sales': 'sum', 'Orders': 'sum'
+    # Map Amazon's messy headers to clean names
+    column_mapping = {
+        'Customer Search Term': 'Term',
+        'Keyword': 'Term',
+        'Campaign Name': 'Campaign',
+        'Spend': 'Spend',
+        'Sales': 'Sales',
+        'Orders': 'Orders',
+        'Clicks': 'Clicks',
+        'Impressions': 'Impressions'
+    }
+    combined_df = combined_df.rename(columns=column_mapping)
+
+    # CRITICAL: Group by 'Term' ONLY to see performance across DIFFERENT campaigns
+    agg_logic = {
+        'Campaign': 'nunique',  # Counts how many different campaigns use this keyword
+        'Impressions': 'sum',
+        'Clicks': 'sum',
+        'Spend': 'sum',
+        'Sales': 'sum',
+        'Orders': 'sum'
+    }
+    
+    # This collapses the data from multiple campaigns into one "Global" row per keyword
+    global_df = combined_df.groupby('Term').agg(agg_logic).reset_index()
+    global_df = global_df.rename(columns={'Campaign': 'Campaign Count'})
+    
+    # Calculate performance metrics
+    global_df['ACOS'] = (global_df['Spend'] / global_df['Sales']).fillna(0)
+    global_df['CTR'] = (global_df['Clicks'] / global_df['Impressions']).fillna(0)
+    
+    return global_df
+
+def perform_ngram_analysis(df, n):
+    from collections import Counter
+    ngram_data = []
+    
+    for _, row in df.iterrows():
+        words = str(row['Term']).split()
+        if len(words) >= n:
+            for i in range(len(words) - n + 1):
+                gram = " ".join(words[i:i+n])
+                ngram_data.append({
+                    'Term': gram,
+                    'Spend': row['Spend'],
+                    'Sales': row['Sales'],
+                    'Clicks': row['Clicks'],
+                    'Orders': row['Orders'],
+                    'Campaign Count': row['Campaign Count']
+                })
+    
+    ngram_df = pd.DataFrame(ngram_data)
+    final_ngram = ngram_df.groupby('Term').agg({
+        'Spend': 'sum',
+        'Sales': 'sum',
+        'Clicks': 'sum',
+        'Orders': 'sum',
+        'Campaign Count': 'max' # Shows the highest redundancy for this phrase
     }).reset_index()
     
-    aggregated['ACOS'] = np.where(aggregated['Sales'] > 0, (aggregated['Spend'] / aggregated['Sales'] * 100), 0)
-    aggregated['CPC'] = np.where(aggregated['Clicks'] > 0, aggregated['Spend'] / aggregated['Clicks'], 0)
-    return aggregated
-
-def is_asin(term):
-    return bool(re.match(r'^B[A-Z0-9]{9}$', str(term).upper()))
-
-def perform_ngram_analysis(aggregated_df, n):
-    ngram_data = defaultdict(lambda: {'freq': 0, 'impressions': 0, 'clicks': 0, 'spend': 0, 'sales': 0, 'orders': 0})
-    for _, row in aggregated_df.iterrows():
-        words = str(row['Customer Search Term']).lower().split()
-        ngrams = [' '.join(words[i:i+n]) for i in range(len(words) - n + 1)]
-        for ng in ngrams:
-            if not is_asin(ng):
-                ngram_data[ng]['freq'] += 1
-                for metric in ['impressions', 'clicks', 'spend', 'sales', 'orders']:
-                    ngram_data[ng][metric] += row[metric.capitalize()]
-    
-    res = []
-    for term, m in ngram_data.items():
-        res.append({
-            'Term': term, 'Frequency': m['freq'], 'Spend': round(m['spend'], 2),
-            'Orders': m['orders'], 'Clicks': m['clicks'],
-            'ACOS': round((m['spend']/m['sales']*100), 2) if m['sales'] > 0 else 0
-        })
-    return pd.DataFrame(res).sort_values('Spend', ascending=False)
+    final_ngram['ACOS'] = (final_ngram['Spend'] / final_ngram['Sales']).fillna(0)
+    return final_ngram.sort_values(by='Spend', ascending=False)
