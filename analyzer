@@ -1,24 +1,19 @@
 import pandas as pd
 
 def load_bulk_file(file):
-    # Load EVERY tab in the Excel file into a dictionary of DataFrames
+    # Load every single tab into a dictionary
     all_sheets = pd.read_excel(file, sheet_name=None)
     
-    # Identify the specific tabs needed for analysis
-    sp_tab = 'SP Search Term Report'
-    sb_tab = 'SB Search Term Report'
-    
-    # Extract only if they exist, otherwise return empty DataFrames to prevent crashes
-    sp_df = all_sheets.get(sp_tab, pd.DataFrame())
-    sb_df = all_sheets.get(sb_tab, pd.DataFrame())
+    # Isolate the data for analysis
+    sp_df = all_sheets.get('SP Search Term Report', pd.DataFrame())
+    sb_df = all_sheets.get('SB Search Term Report', pd.DataFrame())
     
     return sp_df, sb_df, all_sheets
 
 def aggregate_data(sp_df, sb_df):
-    # Combine SP and SB data
     combined_df = pd.concat([sp_df, sb_df], ignore_index=True)
     
-    # Map Amazon's messy headers to clean names
+    # Standardize column names
     column_mapping = {
         'Customer Search Term': 'Term',
         'Keyword': 'Term',
@@ -26,35 +21,27 @@ def aggregate_data(sp_df, sb_df):
         'Spend': 'Spend',
         'Sales': 'Sales',
         'Orders': 'Orders',
-        'Clicks': 'Clicks',
-        'Impressions': 'Impressions'
+        'Clicks': 'Clicks'
     }
     combined_df = combined_df.rename(columns=column_mapping)
 
-    # CRITICAL: Group by 'Term' ONLY to see performance across DIFFERENT campaigns
+    # Group by Term to analyze performance across DIFFERENT campaigns
     agg_logic = {
-        'Campaign': 'nunique',  # Counts how many different campaigns use this keyword
-        'Impressions': 'sum',
-        'Clicks': 'sum',
+        'Campaign': 'nunique', 
         'Spend': 'sum',
         'Sales': 'sum',
-        'Orders': 'sum'
+        'Orders': 'sum',
+        'Clicks': 'sum'
     }
     
-    # This collapses the data from multiple campaigns into one "Global" row per keyword
     global_df = combined_df.groupby('Term').agg(agg_logic).reset_index()
     global_df = global_df.rename(columns={'Campaign': 'Campaign Count'})
-    
-    # Calculate performance metrics
     global_df['ACOS'] = (global_df['Spend'] / global_df['Sales']).fillna(0)
-    global_df['CTR'] = (global_df['Clicks'] / global_df['Impressions']).fillna(0)
     
     return global_df
 
 def perform_ngram_analysis(df, n):
-    from collections import Counter
     ngram_data = []
-    
     for _, row in df.iterrows():
         words = str(row['Term']).split()
         if len(words) >= n:
@@ -64,18 +51,13 @@ def perform_ngram_analysis(df, n):
                     'Term': gram,
                     'Spend': row['Spend'],
                     'Sales': row['Sales'],
-                    'Clicks': row['Clicks'],
                     'Orders': row['Orders'],
                     'Campaign Count': row['Campaign Count']
                 })
     
     ngram_df = pd.DataFrame(ngram_data)
     final_ngram = ngram_df.groupby('Term').agg({
-        'Spend': 'sum',
-        'Sales': 'sum',
-        'Clicks': 'sum',
-        'Orders': 'sum',
-        'Campaign Count': 'max' # Shows the highest redundancy for this phrase
+        'Spend': 'sum', 'Sales': 'sum', 'Orders': 'sum', 'Campaign Count': 'max'
     }).reset_index()
     
     final_ngram['ACOS'] = (final_ngram['Spend'] / final_ngram['Sales']).fillna(0)
