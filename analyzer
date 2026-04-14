@@ -4,18 +4,25 @@ import re
 
 def clean_headers(df):
     """
-    Bulletproof header cleaning:
-    1. Removes literal quotes (' and ")
-    2. Strips currency suffixes like (INR) or (AED)
-    3. Removes all special characters and spaces for internal matching
+    Standardizes headers by removing:
+    1. Literal quotes (' and ")
+    2. Currency suffixes like (INR) or (AED)
+    3. Trailing/Leading whitespace
     """
-    def final_clean(col):
-        s = str(col).strip().replace("'", "").replace('"', '') # Remove quotes
-        s = re.sub(r'\s*\(\w{3}\)', '', s) # Remove (INR)/(AED)
-        return s
-
-    df.columns = [final_clean(c) for c in df.columns]
+    # strip() handles spaces, replace handles the quotes found in your report
+    df.columns = [str(col).replace("'", "").replace('"', '').strip() for col in df.columns]
+    
+    # Remove strings like (INR) or (AED)
+    df.columns = [re.sub(r'\s*\(\w{3}\)', '', col).strip() for col in df.columns]
     return df
+
+def identify_term_type(term, brand_keywords):
+    term = str(term).lower().strip()
+    if re.match(r'^b0[a-z0-9]{8}$', term) or (len(term) == 10 and term.isalnum()):
+        return "Target/ASIN"
+    if any(brand.lower() in term for brand in brand_keywords):
+        return "Brand"
+    return "Generic"
 
 def standardize_and_group(all_files_data, brand_keywords):
     combined_list = []
@@ -23,7 +30,7 @@ def standardize_and_group(all_files_data, brand_keywords):
     for df in all_files_data:
         df = clean_headers(df)
         
-        # We use 'in' logic on the cleaned strings to find the right columns
+        # FUZZY MAPPING: Searches for keywords inside the cleaned headers
         mapping = {
             'Search Term': next((c for c in df.columns if 'Search Term' in c), None),
             'Campaign': next((c for c in df.columns if 'Campaign' in c), None),
@@ -34,29 +41,34 @@ def standardize_and_group(all_files_data, brand_keywords):
             'Orders': next((c for c in df.columns if 'Total Orders' in c or 'Orders' in c), None),
         }
 
-        # Rename
+        # Rename to standardized internal names
         valid_map = {v: k for k, v in mapping.items() if v is not None}
         temp_df = df.rename(columns=valid_map)
         
-        # Select and convert
-        cols = ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']
-        available = [c for c in cols if c in temp_df.columns]
-        subset = temp_df[available].copy()
+        # Select only relevant columns
+        cols_to_keep = [c for c in ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders'] if c in temp_df.columns]
+        subset = temp_df[cols_to_keep].copy()
 
-        # Force numeric - this is where the 'Zero' error is killed
+        # CONVERSION: Critical step to stop '0' values from text columns
         for col in ['Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']:
             if col in subset.columns:
-                # errors='coerce' turns text to NaN, then fillna(0) makes it a clickable number
                 subset[col] = pd.to_numeric(subset[col], errors='coerce').fillna(0)
         
         combined_list.append(subset)
 
-    if not combined_list: return pd.DataFrame()
+    if not combined_list:
+        return pd.DataFrame()
 
     full_data = pd.concat(combined_list, ignore_index=True)
-    full_data['Term Type'] = full_data['Search Term'].apply(
-        lambda x: "Target/ASIN" if (re.match(r'^b0', str(x).lower()) or len(str(x)) == 10) 
-        else ("Brand" if any(b.lower() in str(x).lower() for b in brand_keywords) else "Generic")
-    )
+    full_data['Term Type'] = full_data['Search Term'].apply(lambda x: identify_term_type(x, brand_keywords))
     
-    return full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).sum()
+    # Final aggregation
+    grouped = full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).agg({
+        'Impressions': 'sum', 'Clicks': 'sum', 'Spend': 'sum', 'Sales': 'sum', 'Orders': 'sum'
+    })
+    
+    # Final metrics
+    grouped['ROAS'] = (grouped['Sales'] / grouped['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
+    grouped['ACoS'] = (grouped['Spend'] / grouped['Sales']).replace([np.inf, -np.inf], 0).fillna(0)
+    
+    return grouped.sort_values(by='Spend', ascending=False)
