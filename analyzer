@@ -2,78 +2,66 @@ import pandas as pd
 import numpy as np
 import re
 
-def clean_column_names(df):
-    """Removes currency symbols and suffixes like (AED), (INR), ($) from headers."""
-    # Regex to remove strings like (AED), (INR), (USD), etc.
-    df.columns = [re.sub(r'\s*\(\w{3}\)', '', col).strip() for col in df.columns]
+def identify_term_type(term, brand_keywords):
+    """Categorizes a search term into Brand, Competitor, Generic, or Target/ASIN."""
+    term = str(term).lower().strip()
+    
+    # 1. Identify ASINs or Targets (Starts with b0 or is a 10-char alphanumeric)
+    if re.match(r'^b0[a-z0-9]{8}$', term) or len(term) == 10 and term.isalnum():
+        return "Target/ASIN"
+    
+    # 2. Identify Brand Terms
+    if any(brand.lower() in term for brand in brand_keywords):
+        return "Brand"
+    
+    # 3. Default to Generic
+    # Note: You can add a 'competitor_keywords' list here if you want to split Competitor vs Generic
+    return "Generic"
+
+def clean_headers(df):
+    """Standardizes headers and removes currency/symbols."""
+    df.columns = [re.sub(r'\s*\(\w{3}\)', '', str(col)).strip() for col in df.columns]
+    df.columns = [col.replace('(#)', '').strip() for col in df.columns]
     return df
 
-def find_column(df, keywords):
-    """Finds a column name that contains any of the provided keywords."""
-    for col in df.columns:
-        if any(key.lower() in col.lower() for key in keywords):
-            return col
-    return None
+def standardize_and_group(all_files_data, brand_keywords=['creation lamis', 'scion', 'maison']):
+    combined_list = []
+    
+    for df in all_files_data:
+        df = clean_headers(df)
+        
+        mapping = {
+            'Search Term': next((c for c in df.columns if 'Search Term' in c), None),
+            'Campaign': next((c for c in df.columns if 'Campaign' in c), None),
+            'Impressions': next((c for c in df.columns if 'Impressions' in c), None),
+            'Clicks': next((c for c in df.columns if 'Clicks' in c), None),
+            'Spend': next((c for c in df.columns if 'Spend' in c), None),
+            'Sales': next((c for c in df.columns if 'Total Sales' in c or 'Sales' in c), None),
+            'Orders': next((c for c in df.columns if 'Total Orders' in c or 'Orders' in c), None),
+        }
 
-def standardize_dataframe(df):
-    """Maps regional Amazon headers to a standard set of internal keys."""
-    df = clean_column_names(df)
-    
-    # Mapping logic: Keywords to look for in headers
-    mapping = {
-        'Search Term': find_column(df, ['Customer Search Term', 'Search Term']),
-        'Campaign': find_column(df, ['Campaign Name', 'Campaign']),
-        'Impressions': find_column(df, ['Impressions']),
-        'Clicks': find_column(df, ['Clicks']),
-        'Spend': find_column(df, ['Spend']),
-        'Sales': find_column(df, ['Total Sales', 'Sales']),
-        'Orders': find_column(df, ['Total Orders', 'Orders'])
-    }
-    
-    # Filter out None values
-    valid_map = {v: k for k, v in mapping.items() if v is not None}
-    df = df.rename(columns=valid_map)
-    
-    # Ensure numeric types
-    numeric_cols = ['Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-            
-    return df
+        valid_map = {v: k for k, v in mapping.items() if v is not None}
+        temp_df = df.rename(columns=valid_map)
+        
+        cols_to_keep = [c for c in ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders'] if c in temp_df.columns]
+        subset = temp_df[cols_to_keep].copy()
 
-def aggregate_data(file_list):
-    """Processes multiple files (India, UAE, etc.) and aggregates them."""
-    all_dfs = []
+        for col in ['Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']:
+            if col in subset.columns:
+                subset[col] = pd.to_numeric(subset[col], errors='coerce').fillna(0)
+        
+        combined_list.append(subset)
+
+    full_data = pd.concat(combined_list, ignore_index=True)
     
-    for file in file_list:
-        # Handle both CSV and Excel
-        if file.name.endswith('.csv'):
-            df = pd.read_csv(file)
-        else:
-            # For Excel, we might need to check specific sheets
-            excel_file = pd.ExcelWriter(file, engine='openpyxl') # placeholder logic
-            # Simplification: read first sheet or specific SP/SB sheets
-            df = pd.read_excel(file) 
-            
-        std_df = standardize_dataframe(df)
-        all_dfs.append(std_df)
+    # Apply Categorization
+    full_data['Term Type'] = full_data['Search Term'].apply(lambda x: identify_term_type(x, brand_keywords))
     
-    combined = pd.concat(all_dfs, ignore_index=True)
+    # Aggregate including the new "Term Type"
+    grouped = full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).sum()
     
-    # Group by standardized names
-    grouped = combined.groupby(['Campaign', 'Search Term'], as_index=False).agg({
-        'Impressions': 'sum',
-        'Clicks': 'sum',
-        'Spend': 'sum',
-        'Sales': 'sum',
-        'Orders': 'sum'
-    })
-    
-    # Recalculate metrics
+    # Calculations
     grouped['ROAS'] = (grouped['Sales'] / grouped['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
     grouped['ACoS'] = (grouped['Spend'] / grouped['Sales']).replace([np.inf, -np.inf], 0).fillna(0)
-    grouped['CTR'] = (grouped['Clicks'] / grouped['Impressions']).replace([np.inf, -np.inf], 0).fillna(0)
-    grouped['CPC'] = (grouped['Spend'] / grouped['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
-
+    
     return grouped.sort_values(by='Spend', ascending=False)
