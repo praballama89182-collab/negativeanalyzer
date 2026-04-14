@@ -2,18 +2,24 @@ import pandas as pd
 import numpy as np
 import re
 
+def clean_value(val):
+    """Removes currency symbols (₹, AED, $, etc.) and commas from data cells."""
+    if isinstance(val, str):
+        # Remove anything that isn't a digit, decimal point, or minus sign
+        val = re.sub(r'[^\d\.\-]', '', val)
+        return val
+    return val
+
 def clean_headers(df):
-    """
-    Standardizes headers by removing:
-    1. Literal quotes (' and ")
-    2. Currency suffixes like (INR) or (AED)
-    3. Trailing/Leading whitespace
-    """
-    # strip() handles spaces, replace handles the quotes found in your report
+    """Removes quotes, currency suffixes, and extra spaces from column names."""
+    # 1. Remove literal quotes and strip whitespace
     df.columns = [str(col).replace("'", "").replace('"', '').strip() for col in df.columns]
     
-    # Remove strings like (INR) or (AED)
-    df.columns = [re.sub(r'\s*\(\w{3}\)', '', col).strip() for col in df.columns]
+    # 2. Remove common currency markers like (INR), (AED), ($), etc.
+    df.columns = [re.sub(r'\s*\(\w+\)', '', col).strip() for col in df.columns]
+    
+    # 3. Remove (#) from Order columns
+    df.columns = [col.replace('(#)', '').strip() for col in df.columns]
     return df
 
 def identify_term_type(term, brand_keywords):
@@ -30,7 +36,7 @@ def standardize_and_group(all_files_data, brand_keywords):
     for df in all_files_data:
         df = clean_headers(df)
         
-        # FUZZY MAPPING: Searches for keywords inside the cleaned headers
+        # Mapping using 'contains' logic to ignore prefixes like '14 Day'
         mapping = {
             'Search Term': next((c for c in df.columns if 'Search Term' in c), None),
             'Campaign': next((c for c in df.columns if 'Campaign' in c), None),
@@ -41,33 +47,30 @@ def standardize_and_group(all_files_data, brand_keywords):
             'Orders': next((c for c in df.columns if 'Total Orders' in c or 'Orders' in c), None),
         }
 
-        # Rename to standardized internal names
         valid_map = {v: k for k, v in mapping.items() if v is not None}
         temp_df = df.rename(columns=valid_map)
         
-        # Select only relevant columns
-        cols_to_keep = [c for c in ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders'] if c in temp_df.columns]
-        subset = temp_df[cols_to_keep].copy()
+        cols = ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']
+        available = [c for c in cols if c in temp_df.columns]
+        subset = temp_df[available].copy()
 
-        # CONVERSION: Critical step to stop '0' values from text columns
+        # CLEAN DATA VALUES: Remove currency symbols inside the cells just in case
         for col in ['Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']:
             if col in subset.columns:
+                subset[col] = subset[col].apply(clean_value)
                 subset[col] = pd.to_numeric(subset[col], errors='coerce').fillna(0)
         
         combined_list.append(subset)
 
-    if not combined_list:
-        return pd.DataFrame()
+    if not combined_list: return pd.DataFrame()
 
     full_data = pd.concat(combined_list, ignore_index=True)
     full_data['Term Type'] = full_data['Search Term'].apply(lambda x: identify_term_type(x, brand_keywords))
     
-    # Final aggregation
     grouped = full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).agg({
         'Impressions': 'sum', 'Clicks': 'sum', 'Spend': 'sum', 'Sales': 'sum', 'Orders': 'sum'
     })
     
-    # Final metrics
     grouped['ROAS'] = (grouped['Sales'] / grouped['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
     grouped['ACoS'] = (grouped['Spend'] / grouped['Sales']).replace([np.inf, -np.inf], 0).fillna(0)
     
