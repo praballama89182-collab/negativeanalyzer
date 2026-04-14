@@ -3,68 +3,68 @@ import pandas as pd
 import io
 import analyzer 
 
-st.set_page_config(page_title="PPC Intelligence Analyzer", layout="wide")
+st.set_page_config(page_title="PPC Analyzer Pro", layout="wide")
 
-st.sidebar.title("Settings")
-# Dynamic Brand Keywords Input
-brand_input = st.sidebar.text_area("Enter Brand Keywords (comma separated)", "creation lamis, scion, maison, fuse")
-brand_list = [x.strip() for x in brand_input.split(',')]
+st.sidebar.header("Configuration")
+# Pre-filled with your common brand keywords
+brand_input = st.sidebar.text_area("Brand Keywords (one per line or comma-separated)", "ooze, creation lamis, scion, maison")
+brand_list = [b.strip().lower() for b in brand_input.replace('\n', ',').split(',') if b.strip()]
 
-st.title("📊 Cumulative Search Term & Intent Analyzer")
+st.title("📊 Cumulative Global PPC Analyzer")
+st.info("Upload any Amazon Search Term report (India or UAE). The app will automatically detect fields and remove currency markers.")
 
-uploaded_files = st.file_uploader("Upload Reports", type=["xlsx", "csv"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload Files", type=["xlsx", "csv"], accept_multiple_files=True)
 
 if uploaded_files:
     try:
-        all_dfs_for_summary = []
+        raw_dfs_for_summary = []
         master_tabs = {}
 
         for file in uploaded_files:
             if file.name.endswith('.xlsx'):
                 sheets = pd.read_excel(file, sheet_name=None)
                 for sheet_name, df in sheets.items():
-                    df = analyzer.clean_headers(df)
-                    master_tabs[sheet_name] = df
-                    if any('Search Term' in str(col) for col in df.columns):
-                        all_dfs_for_summary.append(df)
+                    # Preserve every tab for the export
+                    master_tabs[f"{file.name}_{sheet_name}"] = df
+                    # Only analyze sheets that look like search term reports
+                    if any('Search Term' in str(c) for c in df.columns):
+                        raw_dfs_for_summary.append(df)
             else:
                 df = pd.read_csv(file)
-                df = analyzer.clean_headers(df)
-                all_dfs_for_summary.append(df)
                 master_tabs[file.name] = df
+                raw_dfs_for_summary.append(df)
 
-        if all_dfs_for_summary:
-            with st.spinner("Analyzing Intent and Summarizing..."):
-                # Pass the brand list to the analyzer
-                final_summary = analyzer.standardize_and_group(all_dfs_for_summary, brand_list)
+        if raw_dfs_for_summary:
+            with st.spinner("Processing..."):
+                final_df = analyzer.standardize_and_group(raw_dfs_for_summary, brand_list)
                 
-                # --- VISUAL SUMMARY ---
-                st.subheader("Performance by Term Type")
-                type_summary = final_summary.groupby('Term Type').agg({
-                    'Spend': 'sum',
-                    'Sales': 'sum',
-                    'Orders': 'sum'
-                })
-                type_summary['ROAS'] = type_summary['Sales'] / type_summary['Spend']
-                st.table(type_summary.style.format({'Spend': '{:.2f}', 'Sales': '{:.2f}', 'ROAS': '{:.2f}x'}))
+                # Summary Stats
+                st.subheader("High-Level Metrics")
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Total Spend", f"{final_df['Spend'].sum():,.2f}")
+                col2.metric("Total Sales", f"{final_df['Sales'].sum():,.2f}")
+                col3.metric("Total Orders", f"{int(final_df['Orders'].sum())}")
+                roas = final_df['Sales'].sum() / final_df['Spend'].sum() if final_df['Spend'].sum() > 0 else 0
+                col4.metric("Global ROAS", f"{roas:.2f}x")
 
                 st.divider()
-                st.subheader("Detailed Cumulative Report")
-                st.dataframe(final_summary, use_container_width=True)
+                st.subheader("Cumulative Search Term Analysis")
+                st.dataframe(final_df, use_container_width=True)
 
-                # Export
+                # Excel Export
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    for sheet_name, df in master_tabs.items():
-                        df.to_excel(writer, sheet_name=sheet_name[:30], index=False)
-                    final_summary.to_excel(writer, sheet_name="Cumulative Intent Analysis", index=False)
+                    # Keep original data
+                    for name, df in master_tabs.items():
+                        df.to_excel(writer, sheet_name=name[:30], index=False)
+                    # Add our new analysis
+                    final_df.to_excel(writer, sheet_name="Cumulative Analysis", index=False)
                 
                 st.download_button(
-                    label="📥 Download Master File + Intent Analysis",
+                    label="📥 Download Master Report",
                     data=output.getvalue(),
-                    file_name="Master_Intent_Analysis.xlsx",
+                    file_name="PPC_Consolidated_Analysis.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error during processing: {e}")
