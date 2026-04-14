@@ -1,59 +1,69 @@
 import streamlit as st
 import pandas as pd
 import io
-from analyzer import load_bulk_file, aggregate_unique_search_terms
+import analyzer # Ensure analyzer.py is in the same folder
 
-st.set_page_config(page_title="Cumulative PPC Analyzer", layout="wide")
+st.set_page_config(page_title="PPC Master Analyzer", layout="wide")
+st.title("📊 Cumulative Search Term & Bulk File Analyzer")
 
-st.title("📊 Cumulative Search Term Analyzer")
-st.markdown("Summarizing multi-row search term repeats into single rows with **Sales & ROAS**.")
+uploaded_files = st.file_uploader(
+    "Upload Amazon Reports (India/UAE/Bulk)", 
+    type=["xlsx", "csv"], 
+    accept_multiple_files=True
+)
 
-uploaded_file = st.file_uploader("Upload your Amazon Bulk File (.xlsx)", type=["xlsx"])
-
-if uploaded_file:
+if uploaded_files:
     try:
-        with st.spinner("Processing Bulk File and Calculating Metrics..."):
-            # 1. Load and Process
-            sp_df, sb_df, all_sheets = load_bulk_file(uploaded_file)
-            final_df = aggregate_unique_search_terms(sp_df, sb_df)
-            
-            if final_df.empty:
-                st.warning("No search term data found in the uploaded file.")
-            else:
-                # 2. Display Dataframe with proper formatting
-                st.subheader("Cumulative Performance Summary")
-                
-                # Apply styling for the UI
-                styled_df = final_df.style.format({
-                    'Spend': '${:.2f}',
-                    '7 Day Total Sales': '${:.2f}',
-                    'CPC': '${:.2f}',
-                    'ROAS': '{:.2f}x',
-                    'ACoS': '{:.2%}'
-                })
-                
-                st.dataframe(styled_df, use_container_width=True)
+        all_dfs_for_summary = []
+        master_tabs = {} # To store all original sheets
 
-                # 3. Export Section
-                st.divider()
-                st.write("### 📥 Download Results")
+        for file in uploaded_files:
+            if file.name.endswith('.xlsx'):
+                # Load every sheet in the Excel file
+                sheets = pd.read_excel(file, sheet_name=None)
+                for sheet_name, df in sheets.items():
+                    # Clean headers for every sheet immediately
+                    df = analyzer.clean_headers(df)
+                    master_tabs[sheet_name] = df
+                    
+                    # If this sheet looks like it has search term data, add to summary list
+                    if any('Search Term' in str(col) for col in df.columns):
+                        all_dfs_for_summary.append(df)
+            else:
+                # Handle CSV
+                df = pd.read_csv(file)
+                df = analyzer.clean_headers(df)
+                all_dfs_for_summary.append(df)
+                master_tabs[file.name] = df
+
+        if all_dfs_for_summary:
+            with st.spinner("Generating Cumulative Summary..."):
+                final_summary = analyzer.standardize_and_group(all_dfs_for_summary)
                 
+                st.subheader("Preview: Cumulative Search Terms")
+                st.dataframe(final_summary.head(100), use_container_width=True)
+
+                # Export Section
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    # Write original tabs so the file remains useful as a bulk file
-                    for sheet_name, df in all_sheets.items():
-                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    # 1. Write back ALL original tabs (now with cleaned headers)
+                    for sheet_name, df in master_tabs.items():
+                        # Sheet names in Excel must be < 31 chars
+                        safe_name = sheet_name[:30]
+                        df.to_excel(writer, sheet_name=safe_name, index=False)
                     
-                    # Add the new analysis tab
-                    final_df.to_excel(writer, sheet_name="Cumulative Analysis", index=False)
+                    # 2. Add the NEW Cumulative sheet
+                    final_summary.to_excel(writer, sheet_name="Cumulative Summary", index=False)
                 
+                st.divider()
                 st.download_button(
-                    label="Download Excel with Cumulative Tab",
+                    label="📥 Download Full File (All Tabs + Cumulative)",
                     data=output.getvalue(),
-                    file_name="PPC_Cumulative_Report.xlsx",
+                    file_name="Master_PPC_Analysis.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+        else:
+            st.error("No 'Search Term' columns found in the uploaded files.")
 
     except Exception as e:
-        st.error(f"An error occurred: {e}")
-        st.info("Check if your bulk file contains the standard '7 Day Total Sales' and 'Search Term' columns.")
+        st.error(f"Error: {e}")
