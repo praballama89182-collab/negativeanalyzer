@@ -2,62 +2,45 @@ import pandas as pd
 import numpy as np
 import re
 
-def clean_value(val):
-    """Removes currency symbols (₹, AED, $, etc.) and commas from data cells."""
-    if isinstance(val, str):
-        # Remove anything that isn't a digit, decimal point, or minus sign
-        val = re.sub(r'[^\d\.\-]', '', val)
-        return val
-    return val
-
 def clean_headers(df):
-    """Removes quotes, currency suffixes, and extra spaces from column names."""
-    # 1. Remove literal quotes and strip whitespace
+    """Removes quotes, currency suffixes, and extra spaces."""
     df.columns = [str(col).replace("'", "").replace('"', '').strip() for col in df.columns]
-    
-    # 2. Remove common currency markers like (INR), (AED), ($), etc.
     df.columns = [re.sub(r'\s*\(\w+\)', '', col).strip() for col in df.columns]
-    
-    # 3. Remove (#) from Order columns
-    df.columns = [col.replace('(#)', '').strip() for col in df.columns]
     return df
-
-def identify_term_type(term, brand_keywords):
-    term = str(term).lower().strip()
-    if re.match(r'^b0[a-z0-9]{8}$', term) or (len(term) == 10 and term.isalnum()):
-        return "Target/ASIN"
-    if any(brand.lower() in term for brand in brand_keywords):
-        return "Brand"
-    return "Generic"
 
 def standardize_and_group(all_files_data, brand_keywords):
     combined_list = []
     
     for df in all_files_data:
+        # 1. Clean the headers first
         df = clean_headers(df)
         
-        # Mapping using 'contains' logic to ignore prefixes like '14 Day'
+        # 2. Specific Column Mapping (Based on your M, N, Q requirement)
+        # Column M (Index 12) -> Spend
+        # Column N (Index 13) -> Sales
+        # Column Q (Index 16) -> Orders
+        
         mapping = {
-            'Search Term': next((c for c in df.columns if 'Search Term' in c), None),
-            'Campaign': next((c for c in df.columns if 'Campaign' in c), None),
-            'Impressions': next((c for c in df.columns if 'Impressions' in c), None),
-            'Clicks': next((c for c in df.columns if 'Clicks' in c), None),
-            'Spend': next((c for c in df.columns if 'Spend' in c), None),
-            'Sales': next((c for c in df.columns if 'Total Sales' in c or 'Sales' in c), None),
-            'Orders': next((c for c in df.columns if 'Total Orders' in c or 'Orders' in c), None),
+            'Search Term': next((c for c in df.columns if 'Search Term' in c), df.columns[8]),
+            'Campaign': next((c for c in df.columns if 'Campaign' in c), df.columns[3]),
+            'Impressions': next((c for c in df.columns if 'Impressions' in c), df.columns[9]),
+            'Clicks': next((c for c in df.columns if 'Clicks' in c), df.columns[10]),
+            'Spend': df.columns[13], # Column M (Spends) - using index 13 as per standard CSV load
+            'Sales': df.columns[14], # Column N (Ad Sales) - using index 14
+            'Orders': df.columns[17] # Column Q (Orders) - using index 17
         }
 
-        valid_map = {v: k for k, v in mapping.items() if v is not None}
-        temp_df = df.rename(columns=valid_map)
+        # Rename to standardized keys
+        temp_df = df.rename(columns={v: k for k, v in mapping.items()})
         
+        # Filter and Numeric Conversion
         cols = ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']
-        available = [c for c in cols if c in temp_df.columns]
-        subset = temp_df[available].copy()
+        subset = temp_df[[c for c in cols if c in temp_df.columns]].copy()
 
-        # CLEAN DATA VALUES: Remove currency symbols inside the cells just in case
-        for col in ['Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']:
+        for col in ['Spend', 'Sales', 'Orders', 'Clicks', 'Impressions']:
             if col in subset.columns:
-                subset[col] = subset[col].apply(clean_value)
+                # Remove any stray currency symbols like ₹ or AED inside cells
+                subset[col] = subset[col].replace(r'[^\d.]', '', regex=True)
                 subset[col] = pd.to_numeric(subset[col], errors='coerce').fillna(0)
         
         combined_list.append(subset)
@@ -65,8 +48,14 @@ def standardize_and_group(all_files_data, brand_keywords):
     if not combined_list: return pd.DataFrame()
 
     full_data = pd.concat(combined_list, ignore_index=True)
-    full_data['Term Type'] = full_data['Search Term'].apply(lambda x: identify_term_type(x, brand_keywords))
     
+    # Intent Tagging
+    full_data['Term Type'] = full_data['Search Term'].apply(
+        lambda x: "Target/ASIN" if (re.match(r'^b0', str(x).lower()) or len(str(x)) == 10) 
+        else ("Brand" if any(b.lower() in str(x).lower() for b in brand_keywords) else "Generic")
+    )
+    
+    # Final Aggregation
     grouped = full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).agg({
         'Impressions': 'sum', 'Clicks': 'sum', 'Spend': 'sum', 'Sales': 'sum', 'Orders': 'sum'
     })
