@@ -2,34 +2,37 @@ import pandas as pd
 import numpy as np
 import re
 
-def identify_term_type(term, brand_keywords):
-    """Categorizes a search term into Brand, Competitor, Generic, or Target/ASIN."""
-    term = str(term).lower().strip()
-    
-    # 1. Identify ASINs or Targets (Starts with b0 or is a 10-char alphanumeric)
-    if re.match(r'^b0[a-z0-9]{8}$', term) or len(term) == 10 and term.isalnum():
-        return "Target/ASIN"
-    
-    # 2. Identify Brand Terms
-    if any(brand.lower() in term for brand in brand_keywords):
-        return "Brand"
-    
-    # 3. Default to Generic
-    # Note: You can add a 'competitor_keywords' list here if you want to split Competitor vs Generic
-    return "Generic"
-
 def clean_headers(df):
-    """Standardizes headers and removes currency/symbols."""
-    df.columns = [re.sub(r'\s*\(\w{3}\)', '', str(col)).strip() for col in df.columns]
-    df.columns = [col.replace('(#)', '').strip() for col in df.columns]
+    """Deep cleans headers for both India and UAE formats."""
+    # 1. Strip whitespace and remove quotes if present
+    df.columns = [str(col).strip().replace("'", "").replace('"', '') for col in df.columns]
+    
+    # 2. Remove Currency Suffixes like (AED) or (INR)
+    df.columns = [re.sub(r'\s*\(\w{3}\)', '', col).strip() for col in df.columns]
+    
+    # 3. Standardize common symbol-heavy columns
+    df.columns = [col.replace('(#)', '').replace('(CTR)', '').replace('(CPC)', '').strip() for col in df.columns]
     return df
 
-def standardize_and_group(all_files_data, brand_keywords=['creation lamis', 'scion', 'maison']):
+def identify_term_type(term, brand_keywords):
+    """Categorizes intent into Brand, ASIN/Target, or Generic."""
+    term = str(term).lower().strip()
+    # Check for ASIN pattern (b0...) or 10-char alphanumeric
+    if re.match(r'^b0[a-z0-9]{8}$', term) or (len(term) == 10 and term.isalnum()):
+        return "Target/ASIN"
+    # Check for Brand matches
+    if any(brand.lower() in term for brand in brand_keywords):
+        return "Brand"
+    return "Generic"
+
+def standardize_and_group(all_files_data, brand_keywords):
     combined_list = []
     
     for df in all_files_data:
         df = clean_headers(df)
         
+        # Mapping logic with fuzzy matching for 'Sales' and 'Orders'
+        # Handles '14 Day Total Sales ', '7 Day Total Sales', 'Sales', etc.
         mapping = {
             'Search Term': next((c for c in df.columns if 'Search Term' in c), None),
             'Campaign': next((c for c in df.columns if 'Campaign' in c), None),
@@ -43,24 +46,36 @@ def standardize_and_group(all_files_data, brand_keywords=['creation lamis', 'sci
         valid_map = {v: k for k, v in mapping.items() if v is not None}
         temp_df = df.rename(columns=valid_map)
         
-        cols_to_keep = [c for c in ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders'] if c in temp_df.columns]
-        subset = temp_df[cols_to_keep].copy()
+        # Select only the columns we successfully mapped
+        available_cols = [c for c in ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders'] if c in temp_df.columns]
+        subset = temp_df[available_cols].copy()
 
+        # Convert to numeric to ensure calculations don't return 0
         for col in ['Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']:
             if col in subset.columns:
                 subset[col] = pd.to_numeric(subset[col], errors='coerce').fillna(0)
         
         combined_list.append(subset)
 
+    if not combined_list:
+        return pd.DataFrame()
+
     full_data = pd.concat(combined_list, ignore_index=True)
     
-    # Apply Categorization
+    # Categorize and aggregate
     full_data['Term Type'] = full_data['Search Term'].apply(lambda x: identify_term_type(x, brand_keywords))
     
-    # Aggregate including the new "Term Type"
-    grouped = full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).sum()
+    # Standard sum
+    grouped = full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).agg({
+        'Impressions': 'sum',
+        'Clicks': 'sum',
+        'Spend': 'sum',
+        'Sales': 'sum',
+        'Orders': 'sum'
+    })
     
-    # Calculations
+    # Derived Metrics
+    grouped['CPC'] = (grouped['Spend'] / grouped['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
     grouped['ROAS'] = (grouped['Sales'] / grouped['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
     grouped['ACoS'] = (grouped['Spend'] / grouped['Sales']).replace([np.inf, -np.inf], 0).fillna(0)
     
