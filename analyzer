@@ -3,14 +3,14 @@ import numpy as np
 import re
 
 def clean_headers(df):
-    """Deep cleans headers for both India and UAE formats."""
-    # 1. Strip whitespace and remove quotes if present
+    """Deep cleans headers: removes quotes, currency (AED/INR), (#) symbols, and trailing spaces."""
+    # Remove surrounding quotes and strip whitespace from names
     df.columns = [str(col).strip().replace("'", "").replace('"', '') for col in df.columns]
     
-    # 2. Remove Currency Suffixes like (AED) or (INR)
+    # Remove currency suffixes like (AED) or (INR)
     df.columns = [re.sub(r'\s*\(\w{3}\)', '', col).strip() for col in df.columns]
     
-    # 3. Standardize common symbol-heavy columns
+    # Standardize symbol-heavy columns
     df.columns = [col.replace('(#)', '').replace('(CTR)', '').replace('(CPC)', '').strip() for col in df.columns]
     return df
 
@@ -31,8 +31,7 @@ def standardize_and_group(all_files_data, brand_keywords):
     for df in all_files_data:
         df = clean_headers(df)
         
-        # Mapping logic with fuzzy matching for 'Sales' and 'Orders'
-        # Handles '14 Day Total Sales ', '7 Day Total Sales', 'Sales', etc.
+        # FUZZY MAPPING: Finds columns even with prefixes like '14 Day' or '7 Day'
         mapping = {
             'Search Term': next((c for c in df.columns if 'Search Term' in c), None),
             'Campaign': next((c for c in df.columns if 'Campaign' in c), None),
@@ -43,14 +42,15 @@ def standardize_and_group(all_files_data, brand_keywords):
             'Orders': next((c for c in df.columns if 'Total Orders' in c or 'Orders' in c), None),
         }
 
+        # Rename only the columns we found
         valid_map = {v: k for k, v in mapping.items() if v is not None}
         temp_df = df.rename(columns=valid_map)
         
-        # Select only the columns we successfully mapped
+        # Keep only the standardized keys
         available_cols = [c for c in ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders'] if c in temp_df.columns]
         subset = temp_df[available_cols].copy()
 
-        # Convert to numeric to ensure calculations don't return 0
+        # CONVERSION: Force to numeric to fix the "0" values issue
         for col in ['Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']:
             if col in subset.columns:
                 subset[col] = pd.to_numeric(subset[col], errors='coerce').fillna(0)
@@ -61,11 +61,9 @@ def standardize_and_group(all_files_data, brand_keywords):
         return pd.DataFrame()
 
     full_data = pd.concat(combined_list, ignore_index=True)
-    
-    # Categorize and aggregate
     full_data['Term Type'] = full_data['Search Term'].apply(lambda x: identify_term_type(x, brand_keywords))
     
-    # Standard sum
+    # Aggregate
     grouped = full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).agg({
         'Impressions': 'sum',
         'Clicks': 'sum',
@@ -74,7 +72,7 @@ def standardize_and_group(all_files_data, brand_keywords):
         'Orders': 'sum'
     })
     
-    # Derived Metrics
+    # Calculate performance metrics
     grouped['CPC'] = (grouped['Spend'] / grouped['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
     grouped['ROAS'] = (grouped['Sales'] / grouped['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
     grouped['ACoS'] = (grouped['Spend'] / grouped['Sales']).replace([np.inf, -np.inf], 0).fillna(0)
