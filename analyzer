@@ -1,46 +1,79 @@
 import pandas as pd
 import numpy as np
+import re
 
-def load_bulk_file(uploaded_file):
-    """Loads all sheets and extracts Sponsored Products/Brands data."""
-    all_sheets = pd.read_excel(uploaded_file, sheet_name=None)
+def clean_column_names(df):
+    """Removes currency symbols and suffixes like (AED), (INR), ($) from headers."""
+    # Regex to remove strings like (AED), (INR), (USD), etc.
+    df.columns = [re.sub(r'\s*\(\w{3}\)', '', col).strip() for col in df.columns]
+    return df
+
+def find_column(df, keywords):
+    """Finds a column name that contains any of the provided keywords."""
+    for col in df.columns:
+        if any(key.lower() in col.lower() for key in keywords):
+            return col
+    return None
+
+def standardize_dataframe(df):
+    """Maps regional Amazon headers to a standard set of internal keys."""
+    df = clean_column_names(df)
     
-    # Identify SP and SB sheets (Amazon often names them 'Sponsored Products Campaigns' etc.)
-    sp_df = all_sheets.get('Sponsored Products Campaigns', pd.DataFrame())
-    sb_df = all_sheets.get('Sponsored Brands Campaigns', pd.DataFrame())
+    # Mapping logic: Keywords to look for in headers
+    mapping = {
+        'Search Term': find_column(df, ['Customer Search Term', 'Search Term']),
+        'Campaign': find_column(df, ['Campaign Name', 'Campaign']),
+        'Impressions': find_column(df, ['Impressions']),
+        'Clicks': find_column(df, ['Clicks']),
+        'Spend': find_column(df, ['Spend']),
+        'Sales': find_column(df, ['Total Sales', 'Sales']),
+        'Orders': find_column(df, ['Total Orders', 'Orders'])
+    }
     
-    return sp_df, sb_df, all_sheets
-
-def aggregate_unique_search_terms(sp_df, sb_df):
-    """Combines data and aggregates metrics per Term per Campaign."""
-    # Filter for rows that actually contain Search Term data
-    combined = pd.concat([sp_df, sb_df], ignore_index=True)
+    # Filter out None values
+    valid_map = {v: k for k, v in mapping.items() if v is not None}
+    df = df.rename(columns=valid_map)
     
-    # Amazon bulk files use 'Ad Group Name' or 'Campaign Name' - adjust as needed
-    # Focus only on rows with Search Term metrics
-    if 'Search Term' not in combined.columns:
-        return pd.DataFrame(columns=["Error: No 'Search Term' column found"])
+    # Ensure numeric types
+    numeric_cols = ['Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            
+    return df
 
-    # List of metrics to sum
-    metrics = [
-        'Impressions', 'Clicks', 'Spend', 
-        '7 Day Total Sales', '7 Day Total Orders'
-    ]
-
-    # Convert metrics to numeric, forcing errors to 0 (handles 'n/a' or empty strings)
-    for col in metrics:
-        if col in combined.columns:
-            combined[col] = pd.to_numeric(combined[col], errors='coerce').fillna(0)
-
-    # Grouping logic
-    grouped = combined.groupby(['Campaign Name', 'Search Term'], as_index=False)[metrics].sum()
-
-    # Calculate Performance Metrics
+def aggregate_data(file_list):
+    """Processes multiple files (India, UAE, etc.) and aggregates them."""
+    all_dfs = []
+    
+    for file in file_list:
+        # Handle both CSV and Excel
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file)
+        else:
+            # For Excel, we might need to check specific sheets
+            excel_file = pd.ExcelWriter(file, engine='openpyxl') # placeholder logic
+            # Simplification: read first sheet or specific SP/SB sheets
+            df = pd.read_excel(file) 
+            
+        std_df = standardize_dataframe(df)
+        all_dfs.append(std_df)
+    
+    combined = pd.concat(all_dfs, ignore_index=True)
+    
+    # Group by standardized names
+    grouped = combined.groupby(['Campaign', 'Search Term'], as_index=False).agg({
+        'Impressions': 'sum',
+        'Clicks': 'sum',
+        'Spend': 'sum',
+        'Sales': 'sum',
+        'Orders': 'sum'
+    })
+    
+    # Recalculate metrics
+    grouped['ROAS'] = (grouped['Sales'] / grouped['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
+    grouped['ACoS'] = (grouped['Spend'] / grouped['Sales']).replace([np.inf, -np.inf], 0).fillna(0)
+    grouped['CTR'] = (grouped['Clicks'] / grouped['Impressions']).replace([np.inf, -np.inf], 0).fillna(0)
     grouped['CPC'] = (grouped['Spend'] / grouped['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
-    grouped['ROAS'] = (grouped['7 Day Total Sales'] / grouped['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
-    
-    # ACoS is Spend / Sales
-    grouped['ACoS'] = (grouped['Spend'] / grouped['7 Day Total Sales']).replace([np.inf, -np.inf], 0).fillna(0)
-    
-    # Format for readability
+
     return grouped.sort_values(by='Spend', ascending=False)
