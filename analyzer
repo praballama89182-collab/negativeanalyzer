@@ -3,27 +3,19 @@ import numpy as np
 import re
 
 def clean_headers(df):
-    """Deep cleans headers: removes quotes, currency (AED/INR), (#) symbols, and trailing spaces."""
-    # Remove surrounding quotes and strip whitespace from names
-    df.columns = [str(col).strip().replace("'", "").replace('"', '') for col in df.columns]
-    
-    # Remove currency suffixes like (AED) or (INR)
-    df.columns = [re.sub(r'\s*\(\w{3}\)', '', col).strip() for col in df.columns]
-    
-    # Standardize symbol-heavy columns
-    df.columns = [col.replace('(#)', '').replace('(CTR)', '').replace('(CPC)', '').strip() for col in df.columns]
-    return df
+    """
+    Bulletproof header cleaning:
+    1. Removes literal quotes (' and ")
+    2. Strips currency suffixes like (INR) or (AED)
+    3. Removes all special characters and spaces for internal matching
+    """
+    def final_clean(col):
+        s = str(col).strip().replace("'", "").replace('"', '') # Remove quotes
+        s = re.sub(r'\s*\(\w{3}\)', '', s) # Remove (INR)/(AED)
+        return s
 
-def identify_term_type(term, brand_keywords):
-    """Categorizes intent into Brand, ASIN/Target, or Generic."""
-    term = str(term).lower().strip()
-    # Check for ASIN pattern (b0...) or 10-char alphanumeric
-    if re.match(r'^b0[a-z0-9]{8}$', term) or (len(term) == 10 and term.isalnum()):
-        return "Target/ASIN"
-    # Check for Brand matches
-    if any(brand.lower() in term for brand in brand_keywords):
-        return "Brand"
-    return "Generic"
+    df.columns = [final_clean(c) for c in df.columns]
+    return df
 
 def standardize_and_group(all_files_data, brand_keywords):
     combined_list = []
@@ -31,7 +23,7 @@ def standardize_and_group(all_files_data, brand_keywords):
     for df in all_files_data:
         df = clean_headers(df)
         
-        # FUZZY MAPPING: Finds columns even with prefixes like '14 Day' or '7 Day'
+        # We use 'in' logic on the cleaned strings to find the right columns
         mapping = {
             'Search Term': next((c for c in df.columns if 'Search Term' in c), None),
             'Campaign': next((c for c in df.columns if 'Campaign' in c), None),
@@ -42,39 +34,29 @@ def standardize_and_group(all_files_data, brand_keywords):
             'Orders': next((c for c in df.columns if 'Total Orders' in c or 'Orders' in c), None),
         }
 
-        # Rename only the columns we found
+        # Rename
         valid_map = {v: k for k, v in mapping.items() if v is not None}
         temp_df = df.rename(columns=valid_map)
         
-        # Keep only the standardized keys
-        available_cols = [c for c in ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders'] if c in temp_df.columns]
-        subset = temp_df[available_cols].copy()
+        # Select and convert
+        cols = ['Campaign', 'Search Term', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']
+        available = [c for c in cols if c in temp_df.columns]
+        subset = temp_df[available].copy()
 
-        # CONVERSION: Force to numeric to fix the "0" values issue
+        # Force numeric - this is where the 'Zero' error is killed
         for col in ['Impressions', 'Clicks', 'Spend', 'Sales', 'Orders']:
             if col in subset.columns:
+                # errors='coerce' turns text to NaN, then fillna(0) makes it a clickable number
                 subset[col] = pd.to_numeric(subset[col], errors='coerce').fillna(0)
         
         combined_list.append(subset)
 
-    if not combined_list:
-        return pd.DataFrame()
+    if not combined_list: return pd.DataFrame()
 
     full_data = pd.concat(combined_list, ignore_index=True)
-    full_data['Term Type'] = full_data['Search Term'].apply(lambda x: identify_term_type(x, brand_keywords))
+    full_data['Term Type'] = full_data['Search Term'].apply(
+        lambda x: "Target/ASIN" if (re.match(r'^b0', str(x).lower()) or len(str(x)) == 10) 
+        else ("Brand" if any(b.lower() in str(x).lower() for b in brand_keywords) else "Generic")
+    )
     
-    # Aggregate
-    grouped = full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).agg({
-        'Impressions': 'sum',
-        'Clicks': 'sum',
-        'Spend': 'sum',
-        'Sales': 'sum',
-        'Orders': 'sum'
-    })
-    
-    # Calculate performance metrics
-    grouped['CPC'] = (grouped['Spend'] / grouped['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
-    grouped['ROAS'] = (grouped['Sales'] / grouped['Spend']).replace([np.inf, -np.inf], 0).fillna(0)
-    grouped['ACoS'] = (grouped['Spend'] / grouped['Sales']).replace([np.inf, -np.inf], 0).fillna(0)
-    
-    return grouped.sort_values(by='Spend', ascending=False)
+    return full_data.groupby(['Campaign', 'Search Term', 'Term Type'], as_index=False).sum()
